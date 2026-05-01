@@ -954,18 +954,61 @@ class Bot:
         return False
 
     def browse_topic(s, topic):
-        """浏览帖子"""
-        url = (
-            s.cfg["base"] + topic["url"]
-            if topic["url"].startswith("/")
-            else topic["url"]
-        )
+        """浏览帖子 - 通过点击链接而不是直接访问URL"""
         title = topic["title"]
+        topic_id = topic.get("id", "")
 
         s.lg("浏览: " + title)
         try:
-            s.pg.get(url)
-            s._random_delay(2, 4, "帖子加载")
+            # 关键修改：通过点击链接进入话题，而不是直接 get URL
+            # 这样才能让"浏览话题"计数增加
+            clicked = s.pg.run_js(f"""
+            function clickTopic() {{
+                // 查找对应的话题链接
+                const topicRow = document.querySelector('tr.topic-list-item[data-topic-id="{topic_id}"]');
+                if (!topicRow) {{
+                    console.log('未找到话题行');
+                    return false;
+                }}
+
+                const link = topicRow.querySelector('a.title.raw-link.raw-topic-link');
+                if (!link) {{
+                    console.log('未找到话题链接');
+                    return false;
+                }}
+
+                // 点击链接（不是新标签）
+                link.click();
+                return true;
+            }}
+            return clickTopic();
+            """)
+
+            if not clicked:
+                s.lg("点击话题失败，跳过")
+                return False
+
+            # 等待页面加载
+            s._random_delay(3, 5, "话题页面加载")
+
+            # 等待小蓝点消失（确保话题被标记为已读）
+            s.lg("等待话题标记为已读...")
+            blue_dot_disappeared = s.pg.run_js("""
+            function waitForRead() {
+                // 检查小蓝点是否消失
+                // 小蓝点通常在话题标题旁边，class 可能是 badge-notification 或类似的
+                const badge = document.querySelector('.badge-notification');
+                return !badge || badge.style.display === 'none';
+            }
+            return waitForRead();
+            """)
+
+            if blue_dot_disappeared:
+                s.lg("话题已标记为已读")
+            else:
+                s.lg("等待话题标记...")
+                time.sleep(2)  # 额外等待
+
             s.stats["topic"] += 1
 
             # 更新进度
@@ -1012,9 +1055,21 @@ class Bot:
                     s._random_delay(s.cfg["wait_min"], s.cfg["wait_max"], "准备回帖")
                 s.do_reply()
 
+            # 关键修改：返回板块列表
+            # 方法1：点击浏览器返回按钮
+            s.lg("返回板块列表...")
+            s.pg.back()
+            s._random_delay(2, 3, "返回后等待")
+
             return True
         except Exception as e:
             s.lg("浏览失败: " + str(e))
+            # 失败时也尝试返回
+            try:
+                s.pg.back()
+                time.sleep(1)
+            except:
+                pass
             return False
 
     def _update_countdown_display(s):
@@ -1097,8 +1152,10 @@ class Bot:
                 s.run = False
                 break
 
-            s.browse_topic(topic)
-            browsed += 1
+            # 浏览话题（内部会自动返回板块列表）
+            success = s.browse_topic(topic)
+            if success:
+                browsed += 1
 
             # 再次检查是否已达到目标
             if s._check_target_reached():
@@ -1106,8 +1163,9 @@ class Bot:
                 break
 
             # 防风控：帖子之间随机等待（检查开关）
+            # 注意：browse_topic 返回时已经有等待，这里可以减少等待时间
             if s.run and s.enable_wait:
-                s._random_delay(s.cfg["wait_min"], s.cfg["wait_max"], "切换帖子")
+                s._random_delay(0.5, 1.5, "准备下一个话题")
 
         return browsed
 
