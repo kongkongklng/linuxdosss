@@ -10,7 +10,7 @@ Linux.do 论坛自动浏览脚本 (无头版 / Headless)
     - 无 GUI 环境
 
 功能：
-    - 自动登录（用户名 + 密码）
+    - 使用 Cookie 自动登录
     - 自动浏览多个板块
     - 随机点赞帖子
     - 防风控机制（随机间隔）
@@ -20,16 +20,16 @@ Linux.do 论坛自动浏览脚本 (无头版 / Headless)
 使用方法
 ================================================================================
 
-方式一：命令行参数
-    python linux_do_headless.py --username 你的用户名 --password 你的密码
-
-方式二：环境变量（推荐用于 GitHub Actions）
-    export LINUXDO_USERNAME="你的用户名"
-    export LINUXDO_PASSWORD="你的密码"
+方式一：环境变量（推荐用于 GitHub Actions）
+    export LINUXDO_COOKIES="_t=...; _forum_session=...; _rt=..."
     python linux_do_headless.py
+
+方式二：命令行参数
+    python linux_do_headless.py --cookies "_t=...; _forum_session=...; _rt=..."
 
 可选参数：
     --proxy         代理地址，如 127.0.0.1:7897
+    --cookies       Cookie 字符串
     --topics        浏览帖子数量，默认 30
     --like-rate     点赞概率，0-100，默认 30
     --headless      是否无头模式，默认 true
@@ -37,13 +37,13 @@ Linux.do 论坛自动浏览脚本 (无头版 / Headless)
 
 示例：
     # 基本使用
-    python linux_do_headless.py -u myuser -p mypass
+    python linux_do_headless.py
 
     # 指定浏览数量和点赞率
-    python linux_do_headless.py -u myuser -p mypass --topics 50 --like-rate 20
+    python linux_do_headless.py --topics 50 --like-rate 20
 
     # 使用代理
-    python linux_do_headless.py -u myuser -p mypass --proxy 127.0.0.1:7897
+    python linux_do_headless.py --proxy 127.0.0.1:7897
 
 ================================================================================
 GitHub Actions 配置
@@ -51,9 +51,8 @@ GitHub Actions 配置
 
 1. Fork 本仓库到你的账号，并设为私有
 
-2. 添加 Secrets（Settings -> Secrets and variables -> Actions）：
-   - LINUXDO_USERNAME: 你的 Linux.do 用户名
-   - LINUXDO_PASSWORD: 你的 Linux.do 密码
+2. 添加 Secret（Settings -> Secrets and variables -> Actions）：
+   - LINUXDO_COOKIES: Linux.do Cookie 字符串
 
 3. 启用 Actions（Actions -> I understand my workflows, go ahead and enable them）
 
@@ -76,6 +75,7 @@ import sys
 import random
 import time
 import argparse
+import json
 from datetime import datetime
 
 # 检查依赖
@@ -207,6 +207,11 @@ class LinuxDoBot:
         try:
             options = ChromiumOptions()
 
+            # 使用独立的浏览器数据目录，避免连接到用户正在使用的普通 Chrome 实例。
+            user_data_dir = os.path.join(os.getcwd(), "browser_data_headless")
+            options.set_user_data_path(user_data_dir)
+            self.log.debug(f"使用用户数据目录: {user_data_dir}")
+
             # 无头模式
             if headless:
                 options.set_argument("--headless=new")
@@ -219,6 +224,11 @@ class LinuxDoBot:
 
             # 反自动化检测
             options.set_argument("--disable-blink-features=AutomationControlled")
+            options.set_argument("--no-first-run")
+            options.set_argument("--no-default-browser-check")
+            options.set_argument("--disable-sync")
+            options.set_argument("--profile-directory=Default")
+            options.set_argument("--disable-features=ChromeWhatsNewUI,SigninInterception,SignInProfileCreation")
             options.set_argument("--no-sandbox")
             options.set_argument("--disable-dev-shm-usage")
             options.set_argument("--disable-gpu")
@@ -248,6 +258,17 @@ class LinuxDoBot:
         self.log.info("开始登录...")
 
         try:
+            if self.config.get("cookies"):
+                if self._load_cookies_from_string(self.config["cookies"]):
+                    return True
+
+            if self.config.get("cookies_file"):
+                if self._load_cookies_from_file(self.config["cookies_file"]):
+                    return True
+
+            if self.config.get("manual_login"):
+                return self._wait_for_manual_login()
+
             # 访问登录页面
             login_url = f"{self.config['base_url']}/login"
             self.page.get(login_url)
@@ -258,6 +279,9 @@ class LinuxDoBot:
             username_input = self.page.ele("#login-account-name", timeout=10)
             if not username_input:
                 self.log.error("未找到用户名输入框")
+                if not self.config.get("headless", True):
+                    self.log.warning("当前是有头模式，切换为手动登录等待")
+                    return self._wait_for_manual_login()
                 return False
             username_input.clear()
             username_input.input(self.username)
@@ -294,6 +318,116 @@ class LinuxDoBot:
 
         except Exception as e:
             self.log.error(f"登录过程出错: {e}")
+            return False
+
+    def _load_cookies_from_string(self, cookies_text):
+        """从 LINUXDO_COOKIES 形式的字符串导入 cookies"""
+        self.log.info("使用 LINUXDO_COOKIES 登录...")
+        try:
+            cookies = []
+            for item in cookies_text.split(";"):
+                item = item.strip()
+                if not item or "=" not in item:
+                    continue
+                name, value = item.split("=", 1)
+                cookies.append(
+                    {
+                        "name": name.strip(),
+                        "value": value.strip(),
+                        "domain": ".linux.do",
+                        "path": "/",
+                    }
+                )
+
+            if not cookies:
+                self.log.error("LINUXDO_COOKIES 为空或格式不正确")
+                return False
+
+            return self._apply_cookies_and_check(cookies)
+        except Exception as e:
+            self.log.error(f"LINUXDO_COOKIES 登录失败: {e}")
+            return False
+
+    def _load_cookies_from_file(self, cookies_file):
+        """从浏览器导出的 JSON 文件导入 cookies"""
+        self.log.info("使用 cookies 文件登录...")
+        try:
+            with open(cookies_file, "r", encoding="utf-8") as f:
+                raw_cookies = json.load(f)
+
+            cookies = []
+            for item in raw_cookies:
+                cookie = {
+                    "name": item["name"],
+                    "value": item.get("value", ""),
+                    "domain": item.get("domain", "linux.do"),
+                    "path": item.get("path", "/"),
+                }
+                if item.get("expirationDate"):
+                    cookie["expires"] = item["expirationDate"]
+                if item.get("secure") is not None:
+                    cookie["secure"] = bool(item["secure"])
+                if item.get("httpOnly") is not None:
+                    cookie["httpOnly"] = bool(item["httpOnly"])
+
+                same_site = item.get("sameSite")
+                if same_site:
+                    same_site_map = {
+                        "lax": "Lax",
+                        "strict": "Strict",
+                        "no_restriction": "None",
+                    }
+                    cookie["sameSite"] = same_site_map.get(same_site, same_site)
+
+                cookies.append(cookie)
+
+            return self._apply_cookies_and_check(cookies)
+        except Exception as e:
+            self.log.error(f"cookies 文件登录失败: {e}")
+            return False
+
+    def _apply_cookies_and_check(self, cookies):
+        """写入 cookies 并验证登录状态"""
+        self.page.get(self.config["base_url"])
+        self._random_delay(1, 2, "导入 cookies 前加载首页")
+        self.page.set.cookies(cookies)
+        self.page.get(self.config["base_url"])
+        self._random_delay(2, 3, "导入 cookies 后验证")
+
+        if self.page.ele("#current-user", timeout=5):
+            self.log.success("cookies 登录成功")
+            return True
+
+        self.log.error("cookies 已导入，但未检测到登录状态")
+        return False
+
+    def _wait_for_manual_login(self, timeout=300, interval=5):
+        """有头模式下等待用户在浏览器中手动登录"""
+        self.log.info("请在打开的浏览器中手动登录 Linux.do")
+        self.log.info(f"最长等待 {timeout} 秒，检测到登录后会继续运行")
+
+        try:
+            self.page.get(self.config["base_url"])
+            self._random_delay(2, 3, "首页加载")
+
+            if self.page.ele("#current-user", timeout=3):
+                self.log.success("已检测到登录状态")
+                return True
+
+            self.page.get(f"{self.config['base_url']}/login")
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if self.page.ele("#current-user", timeout=2):
+                    self.log.success("手动登录成功")
+                    return True
+                remaining = int(timeout - (time.time() - start_time))
+                self.log.info(f"等待登录中，剩余 {remaining} 秒...")
+                time.sleep(interval)
+
+            self.log.error("等待手动登录超时")
+            return False
+        except Exception as e:
+            self.log.error(f"等待手动登录出错: {e}")
             return False
 
     def _check_login(self):
@@ -458,6 +592,8 @@ class LinuxDoBot:
         start_time = time.time()
 
         try:
+            self.config["headless"] = headless
+
             # 启动浏览器
             if not self.start_browser(headless=headless, proxy=proxy):
                 return self.stats
@@ -539,13 +675,13 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python linux_do_headless.py -u myuser -p mypass
-  python linux_do_headless.py -u myuser -p mypass --topics 50
-  python linux_do_headless.py -u myuser -p mypass --proxy 127.0.0.1:7897
+  export LINUXDO_COOKIES="_t=...; _forum_session=...; _rt=..."
+  python linux_do_headless.py
+  python linux_do_headless.py --topics 50
+  python linux_do_headless.py --proxy 127.0.0.1:7897
 
 环境变量:
-  LINUXDO_USERNAME  用户名
-  LINUXDO_PASSWORD  密码
+  LINUXDO_COOKIES   Cookie 字符串
   LINUXDO_PROXY     代理地址（可选）
         """,
     )
@@ -557,6 +693,11 @@ def parse_args():
         "-p", "--password", help="Linux.do 密码（或设置环境变量 LINUXDO_PASSWORD）"
     )
     parser.add_argument("--proxy", help="代理地址，如 127.0.0.1:7897")
+    parser.add_argument(
+        "--cookies",
+        help="Cookie 字符串，格式如 '_t=...; _forum_session=...'（或设置 LINUXDO_COOKIES）",
+    )
+    parser.add_argument("--cookies-file", help="浏览器导出的 cookies JSON 文件")
     parser.add_argument("--topics", type=int, default=30, help="浏览帖子数量，默认 30")
     parser.add_argument(
         "--like-rate", type=int, default=30, help="点赞概率（0-100），默认 30"
@@ -577,18 +718,24 @@ def main():
     username = args.username or os.environ.get("LINUXDO_USERNAME")
     password = args.password or os.environ.get("LINUXDO_PASSWORD")
     proxy = args.proxy or os.environ.get("LINUXDO_PROXY")
+    cookies = args.cookies or os.environ.get("LINUXDO_COOKIES")
+    cookies_file = args.cookies_file or os.environ.get("LINUXDO_COOKIES_FILE")
 
-    # 验证必要参数
-    if not username or not password:
-        print("错误: 请提供用户名和密码")
+    manual_login = not username or not password
+
+    # 无头模式无法手动登录，必须提供 cookies 或账号密码
+    if manual_login and not args.no_headless and not cookies and not cookies_file:
+        print("错误: 请提供 LINUXDO_COOKIES")
         print()
-        print("方式一: 命令行参数")
-        print("  python linux_do_headless.py -u 用户名 -p 密码")
-        print()
-        print("方式二: 环境变量")
-        print("  export LINUXDO_USERNAME='用户名'")
-        print("  export LINUXDO_PASSWORD='密码'")
+        print("方式一: 环境变量（推荐 GitHub Actions）")
+        print("  export LINUXDO_COOKIES='_t=...; _forum_session=...; _rt=...'")
         print("  python linux_do_headless.py")
+        print()
+        print("方式二: 命令行参数")
+        print("  python linux_do_headless.py --cookies '_t=...; _forum_session=...; _rt=...'")
+        print()
+        print("或使用有头模式手动登录:")
+        print("  python linux_do_headless.py --no-headless")
         sys.exit(1)
 
     # 创建日志工具
@@ -597,6 +744,9 @@ def main():
     # 配置
     config = {
         "like_rate": args.like_rate / 100,  # 转换为小数
+        "manual_login": manual_login,
+        "cookies": cookies,
+        "cookies_file": cookies_file,
     }
 
     # 创建机器人并运行

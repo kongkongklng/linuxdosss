@@ -16,9 +16,8 @@
 # 2. 将仓库设为私有（重要！保护你的账号信息）
 #    Settings -> General -> Danger Zone -> Change visibility -> Make private
 #
-# 3. 添加 Secrets（Settings -> Secrets and variables -> Actions -> New repository secret）
-#    - LINUXDO_USERNAME: 你的 Linux.do 用户名
-#    - LINUXDO_PASSWORD: 你的 Linux.do 密码
+# 3. 添加 Secret（Settings -> Secrets and variables -> Actions -> New repository secret）
+#    - LINUXDO_COOKIES: Linux.do Cookie 字符串，格式为 name=value; name2=value2
 #
 # 4. 启用 Actions
 #    Actions -> I understand my workflows, go ahead and enable them
@@ -95,8 +94,7 @@ jobs:
       # 运行脚本
       - name: Run browse script
         env:
-          LINUXDO_USERNAME: ${{ secrets.LINUXDO_USERNAME }}
-          LINUXDO_PASSWORD: ${{ secrets.LINUXDO_PASSWORD }}
+          LINUXDO_COOKIES: ${{ secrets.LINUXDO_COOKIES }}
         run: |
           # 获取参数（手动触发时使用输入值，定时触发时使用默认值）
           TOPICS="${{ github.event.inputs.topics || '30' }}"
