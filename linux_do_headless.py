@@ -258,13 +258,21 @@ class LinuxDoBot:
         self.log.info("开始登录...")
 
         try:
+            cookie_login_attempted = False
+
             if self.config.get("cookies"):
+                cookie_login_attempted = True
                 if self._load_cookies_from_string(self.config["cookies"]):
                     return True
 
             if self.config.get("cookies_file"):
+                cookie_login_attempted = True
                 if self._load_cookies_from_file(self.config["cookies_file"]):
                     return True
+
+            if cookie_login_attempted:
+                self.log.error("cookies 登录失败，已禁用手动登录兜底")
+                return False
 
             if self.config.get("manual_login"):
                 return self._wait_for_manual_login()
