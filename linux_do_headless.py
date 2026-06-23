@@ -329,23 +329,27 @@ class LinuxDoBot:
             return False
 
     def _load_cookies_from_string(self, cookies_text):
-        """从 LINUXDO_COOKIES 形式的字符串导入 cookies"""
+        """从 LINUXDO_COOKIES 导入 cookies，支持 Cookie 字符串或 JSON 数组"""
         self.log.info("使用 LINUXDO_COOKIES 登录...")
         try:
-            cookies = []
-            for item in cookies_text.split(";"):
-                item = item.strip()
-                if not item or "=" not in item:
-                    continue
-                name, value = item.split("=", 1)
-                cookies.append(
-                    {
-                        "name": name.strip(),
-                        "value": value.strip(),
-                        "domain": ".linux.do",
-                        "path": "/",
-                    }
-                )
+            cookies_text = cookies_text.strip()
+            if cookies_text.startswith("["):
+                cookies = self._normalize_exported_cookies(json.loads(cookies_text))
+            else:
+                cookies = []
+                for item in cookies_text.split(";"):
+                    item = item.strip()
+                    if not item or "=" not in item:
+                        continue
+                    name, value = item.split("=", 1)
+                    cookies.append(
+                        {
+                            "name": name.strip(),
+                            "value": value.strip(),
+                            "domain": "linux.do",
+                            "path": "/",
+                        }
+                    )
 
             if not cookies:
                 self.log.error("LINUXDO_COOKIES 为空或格式不正确")
@@ -363,36 +367,43 @@ class LinuxDoBot:
             with open(cookies_file, "r", encoding="utf-8") as f:
                 raw_cookies = json.load(f)
 
-            cookies = []
-            for item in raw_cookies:
-                cookie = {
-                    "name": item["name"],
-                    "value": item.get("value", ""),
-                    "domain": item.get("domain", "linux.do"),
-                    "path": item.get("path", "/"),
-                }
-                if item.get("expirationDate"):
-                    cookie["expires"] = item["expirationDate"]
-                if item.get("secure") is not None:
-                    cookie["secure"] = bool(item["secure"])
-                if item.get("httpOnly") is not None:
-                    cookie["httpOnly"] = bool(item["httpOnly"])
-
-                same_site = item.get("sameSite")
-                if same_site:
-                    same_site_map = {
-                        "lax": "Lax",
-                        "strict": "Strict",
-                        "no_restriction": "None",
-                    }
-                    cookie["sameSite"] = same_site_map.get(same_site, same_site)
-
-                cookies.append(cookie)
+            cookies = self._normalize_exported_cookies(raw_cookies)
 
             return self._apply_cookies_and_check(cookies)
         except Exception as e:
             self.log.error(f"cookies 文件登录失败: {e}")
             return False
+
+    def _normalize_exported_cookies(self, raw_cookies):
+        """转换浏览器扩展导出的 Cookie JSON 为 DrissionPage 可写入格式"""
+        cookies = []
+        same_site_map = {
+            "lax": "Lax",
+            "strict": "Strict",
+            "no_restriction": "None",
+        }
+
+        for item in raw_cookies:
+            cookie = {
+                "name": item["name"],
+                "value": item.get("value", ""),
+                "domain": item.get("domain", "linux.do"),
+                "path": item.get("path", "/"),
+            }
+            if item.get("expirationDate"):
+                cookie["expires"] = item["expirationDate"]
+            if item.get("secure") is not None:
+                cookie["secure"] = bool(item["secure"])
+            if item.get("httpOnly") is not None:
+                cookie["httpOnly"] = bool(item["httpOnly"])
+
+            same_site = item.get("sameSite")
+            if same_site:
+                cookie["sameSite"] = same_site_map.get(same_site, same_site)
+
+            cookies.append(cookie)
+
+        return cookies
 
     def _apply_cookies_and_check(self, cookies):
         """写入 cookies 并验证登录状态"""
