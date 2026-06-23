@@ -407,6 +407,7 @@ class LinuxDoBot:
 
     def _apply_cookies_and_check(self, cookies):
         """写入 cookies 并验证登录状态"""
+        self.log.debug(f"准备导入 {len(cookies)} 个 cookies")
         self.page.get(self.config["base_url"])
         self._random_delay(1, 2, "导入 cookies 前加载首页")
         self.page.set.cookies(cookies)
@@ -417,8 +418,45 @@ class LinuxDoBot:
             self.log.success("cookies 登录成功")
             return True
 
+        if self._check_login_by_api():
+            return True
+
         self.log.error("cookies 已导入，但未检测到登录状态")
         return False
+
+    def _check_login_by_api(self):
+        """通过 Discourse 当前会话接口验证登录状态"""
+        try:
+            self.log.debug("页面检测未通过，改用 /session/current.json 验证登录")
+            self.page.get(f"{self.config['base_url']}/session/current.json")
+            self._random_delay(1, 2, "会话接口加载")
+
+            text = self.page.run_js(
+                "return document.body ? document.body.innerText : '';"
+            )
+            if not text:
+                self.log.debug("会话接口返回为空")
+                return False
+
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                title = self.page.run_js("return document.title || '';")
+                preview = text[:120].replace("\n", " ")
+                self.log.debug(f"会话接口不是 JSON，title={title!r}, preview={preview!r}")
+                return False
+
+            user = data.get("current_user")
+            if user:
+                username = user.get("username") or user.get("name") or "用户"
+                self.log.success(f"cookies 登录成功: {username}")
+                return True
+
+            self.log.debug("会话接口返回 current_user 为空")
+            return False
+        except Exception as e:
+            self.log.debug(f"会话接口验证失败: {e}")
+            return False
 
     def _wait_for_manual_login(self, timeout=300, interval=5):
         """有头模式下等待用户在浏览器中手动登录"""
